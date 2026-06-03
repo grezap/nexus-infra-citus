@@ -176,9 +176,9 @@ pwsh -File scripts\citus.ps1 destroy
 
 | Sub-phase | State |
 |---|---|
-| Templates (etcd + pg) | _to be filled at ratification_ |
-| Live ratification (smoke ALL GREEN) | _to be filled_ |
-| Cold-rebuild proof | _to be filled_ |
+| Templates (`citus-etcd-node` + `citus-pg-node`) | ✅ BUILT (rebuilt clean with all T1–T7 fixes baked) |
+| Live ratification (smoke ALL GREEN) | ✅ **PROVEN 2026-06-03** — `smoke-0.P.ps1` 69/69 (incl worker Patroni failover) |
+| Cold-rebuild proof | ✅ **PROVEN 2026-06-03** — template rebuild → destroy (55) → from-zero single apply (`-parallelism=3`, **56 resources, 0 transients**) → smoke 69/69 GREEN |
 
 ---
 
