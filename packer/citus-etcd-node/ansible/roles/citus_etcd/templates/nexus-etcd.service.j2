@@ -1,0 +1,37 @@
+[Unit]
+Description=Nexus etcd (Patroni DCS)
+Documentation=https://etcd.io/docs/v3.5/
+After=network-online.target citus-node-firstboot.service
+Wants=network-online.target
+Requires=citus-node-firstboot.service
+# Delivered DISABLED by the oltp_etcd Packer role. role-overlay-etcd-
+# bootstrap.tf renders {{ citus_etcd_config_dir }}/etcd.conf.yml
+# (with the 3-member initial-cluster string), role-overlay-patroni-tls.tf
+# has already rendered server-cert.pem + server-key.pem + ca.pem, and the
+# bootstrap overlay starts nexus-etcd.service across all 3 nodes in
+# parallel + waits for leader election.
+ConditionPathExists={{ citus_etcd_config_dir }}/etcd.conf.yml
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+Type=notify
+User={{ citus_etcd_user }}
+Group={{ citus_etcd_group }}
+ExecStart=/usr/local/bin/etcd --config-file={{ citus_etcd_config_dir }}/etcd.conf.yml
+# etcd handles SIGTERM cleanly (flush WAL, snapshot, raft step-down).
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=nexus-etcd
+RuntimeDirectoryMode=0755
+LimitNOFILE=65536
+TasksMax=infinity
+StandardOutput=journal
+StandardError=journal
+Environment=ETCD_UNSUPPORTED_ARCH=amd64
+
+[Install]
+WantedBy=multi-user.target

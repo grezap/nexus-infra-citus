@@ -1,0 +1,147 @@
+name: packer-validate
+
+# Mirrors nexus-infra-vmware/.github/workflows/packer-validate.yml shape.
+# Per the 0.G.3.5c chunk 2 close-out: 4 per-engine packer templates
+# (oltp-{redis,mongo,pxc,proxysql}-node) + 3 per-cluster terraform envs
+# (envs/oltp-{redis,mongo,percona}). Same five-job structure: packer
+# (matrix) + terraform (matrix) + ansible-lint + shell-lint + gitleaks.
+#
+# Added at 0.G.2 close-out 2026-05-17 -- the repo had been receiving pushes
+# since the 0.G.1 scaffold without any automated validation. Per
+# memory/feedback_post_push_ci_check.md: every push to a nexus-* repo must
+# be CI-green-verified before considering work done.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Force Node 24 runtime for every JS action regardless of pinned version.
+# Node 20 is deprecated on GitHub Actions runners as of 2026-06-02; this
+# env opts in now. Becomes a no-op once Node 24 is the runner default --
+# can be removed then.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  packer:
+    name: Packer validate (${{ matrix.template }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # max-parallel: 1 -- mirrors vmware lesson (GitHub-API rate limit on
+      # `packer init` plugin resolution). Currently only 1 template anyway.
+      max-parallel: 1
+      matrix:
+        template:
+          - citus-etcd-node      # Phase 0.P per-engine (etcd 3.5 Patroni DCS)
+          - citus-pg-node        # Phase 0.P per-engine (PostgreSQL 17 + Citus + Patroni + keepalived)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-packer@v3
+        with:
+          version: "1.11.2"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.config/packer/plugins
+          key: packer-plugins-${{ runner.os }}-${{ hashFiles('packer/**/*.pkr.hcl') }}
+          restore-keys: |
+            packer-plugins-${{ runner.os }}-
+
+      - name: packer init
+        working-directory: packer/${{ matrix.template }}
+        env:
+          PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: packer init .
+
+      - name: packer fmt -check
+        working-directory: packer/${{ matrix.template }}
+        run: packer fmt -check -recursive .
+
+      - name: packer validate
+        working-directory: packer/${{ matrix.template }}
+        # -syntax-only skips credential / network probe -- CI has no VMware host
+        run: packer validate -syntax-only .
+
+  terraform:
+    name: Terraform fmt + validate (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - envs/citus           # Phase 0.P per-cluster (9 Citus-tier VMs + 3 VRRP VIPs)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: terraform fmt -check (repo-wide)
+        run: terraform -chdir=terraform fmt -check -recursive
+      - name: terraform init (no backend)
+        run: terraform -chdir=terraform/${{ matrix.env }} init -backend=false
+      - name: terraform validate
+        run: terraform -chdir=terraform/${{ matrix.env }} validate
+
+  ansible-lint:
+    name: ansible-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-lint ansible
+      - run: ansible-lint packer/citus-etcd-node/ansible/ packer/citus-pg-node/ansible/ packer/_shared/ansible/
+
+  shell-lint:
+    name: ShellCheck + PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck (scandir excludes *.ps1)
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./scripts
+          severity: warning
+          ignore_names: '*.ps1'
+        # ShellCheck has no bash scripts to lint in oltp's scripts/ today
+        # (all .ps1 are excluded); this step is a no-op stub for forward
+        # compat when bash scripts get added.
+        continue-on-error: true
+      - name: PSScriptAnalyzer (operator wrapper + smoke scripts)
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          $targets = @('scripts') | Where-Object { Test-Path $_ }
+          $issues = foreach ($t in $targets) {
+            Invoke-ScriptAnalyzer -Path $t -Recurse -Severity Warning,Error `
+              -ExcludeRule PSAvoidUsingWriteHost,PSUseShouldProcessForStateChangingFunctions
+          }
+          if ($issues) {
+            $issues | Format-Table -AutoSize | Out-String | Write-Host
+            $errors = $issues | Where-Object Severity -eq 'Error'
+            if ($errors) { throw "PSScriptAnalyzer: $($errors.Count) error(s)" }
+          } else {
+            Write-Host "PSScriptAnalyzer: clean"
+          }
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks detect
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"

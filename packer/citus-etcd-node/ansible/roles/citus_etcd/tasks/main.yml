@@ -1,0 +1,174 @@
+---
+# citus_etcd role -- install etcd from upstream GitHub release tarball +
+# etcdctl + etcdutl + nexus-etcd.service (DISABLED -- the terraform role-
+# overlays render etcd.conf.yml + enable + start per-host via the
+# etcd-bootstrap sequence).
+#
+# Why upstream tarball (not Debian apt main): Debian 13's apt etcd is 3.4.x
+# (which Patroni 4 talks to via the deprecated v2 API). We need 3.5+ for
+# the gRPC v3 API + the etcdctl/etcdutl split + the snapshot-restore tooling.
+# Upstream ships statically-linked Linux amd64 binaries -- no apt dependency
+# graph drama.
+
+# ─── System user/group (apt doesn't create them since we're not using apt's etcd) ─
+- name: Create etcd system group
+  ansible.builtin.group:
+    name: "{{ citus_etcd_group }}"
+    system: true
+    state: present
+
+# The shared citus-node-firstboot.sh chowns /etc/nexus-citus/node-identity.env
+# to group `citus` on EVERY role (the identity dir is group citus cluster-wide).
+# The tablet + gate roles create this group; the etcd role must too, else
+# firstboot fails `chown: invalid group: root:citus`. (0.P ratification fix.)
+- name: Create citus system group (firstboot node-identity ownership)
+  ansible.builtin.group:
+    name: citus
+    system: true
+    state: present
+
+- name: Create etcd system user
+  ansible.builtin.user:
+    name: "{{ citus_etcd_user }}"
+    group: "{{ citus_etcd_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ citus_etcd_data_dir }}"
+    create_home: false
+    state: present
+
+# ─── Per-node dirs ────────────────────────────────────────────────────────
+- name: Create nexus-etcd directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ citus_etcd_config_dir }}", owner: root, group: "{{ citus_etcd_group }}", mode: '0750' }
+    - { path: "{{ citus_etcd_config_dir }}/tls", owner: root, group: "{{ citus_etcd_group }}", mode: '0750' }
+    - { path: "{{ citus_etcd_data_dir }}", owner: "{{ citus_etcd_user }}", group: "{{ citus_etcd_group }}", mode: '0700' }
+    - { path: "{{ citus_etcd_log_dir }}", owner: "{{ citus_etcd_user }}", group: "{{ citus_etcd_group }}", mode: '0750' }
+
+# ─── Download + install etcd tarball ──────────────────────────────────────
+- name: Check if etcd binary already installed at requested version
+  ansible.builtin.shell: |
+    set -o pipefail
+    if [ -x /usr/local/bin/etcd ]; then
+      v=$(/usr/local/bin/etcd --version 2>/dev/null | head -1 | awk '{print $3}')
+      if [ "$v" = "{{ citus_etcd_version }}" ]; then
+        echo present
+      fi
+    fi
+  args:
+    executable: /bin/bash
+  register: citus_etcd_check
+  changed_when: false
+  failed_when: false
+
+- name: Download etcd release tarball (v{{ citus_etcd_version }})
+  ansible.builtin.get_url:
+    url: "https://github.com/etcd-io/etcd/releases/download/v{{ citus_etcd_version }}/etcd-v{{ citus_etcd_version }}-linux-amd64.tar.gz"
+    dest: "/tmp/etcd-v{{ citus_etcd_version }}-linux-amd64.tar.gz"
+    mode: '0644'
+  when: "'present' not in (citus_etcd_check.stdout | default(''))"
+
+- name: Extract etcd release tarball
+  ansible.builtin.unarchive:
+    src: "/tmp/etcd-v{{ citus_etcd_version }}-linux-amd64.tar.gz"
+    dest: /tmp/
+    remote_src: true
+    creates: "/tmp/etcd-v{{ citus_etcd_version }}-linux-amd64/etcd"
+  when: "'present' not in (citus_etcd_check.stdout | default(''))"
+
+- name: Install etcd binaries to /usr/local/bin
+  ansible.builtin.copy:
+    src: "/tmp/etcd-v{{ citus_etcd_version }}-linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - etcd
+    - etcdctl
+    - etcdutl
+  when: "'present' not in (citus_etcd_check.stdout | default(''))"
+
+- name: Cleanup etcd tarball + extract dir
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/etcd-v{{ citus_etcd_version }}-linux-amd64.tar.gz"
+    - "/tmp/etcd-v{{ citus_etcd_version }}-linux-amd64"
+
+# /usr/local/sbin/nexus-etcdctl -- operator wrapper that pre-loads
+# endpoints + TLS material from the standard nexus-etcd paths. Saves the
+# operator typing --endpoints + --cacert + --cert + --key on every
+# invocation. The wrapper relies on the etcd-bootstrap overlay having
+# populated /etc/nexus-etcd/endpoints (a single-line file with the comma-
+# separated https URLs) + the TLS material under /etc/nexus-etcd/tls/.
+# Falls back to localhost:2379 + no-TLS if endpoints missing (useful at
+# very early bootstrap before TLS is rendered).
+- name: Install /usr/local/sbin/nexus-etcdctl operator wrapper
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/nexus-etcdctl
+    content: |
+      #!/bin/bash
+      # nexus-etcdctl -- etcdctl wrapper pre-loaded with endpoints + TLS.
+      # Saves typing --endpoints + --cacert + --cert + --key on every call.
+      set -e
+      ENDPOINTS_FILE=/etc/nexus-etcd/endpoints
+      TLS_DIR=/etc/nexus-etcd/tls
+      ENDPOINTS=""
+      if [ -s "$ENDPOINTS_FILE" ]; then
+        ENDPOINTS=$(cat "$ENDPOINTS_FILE")
+      fi
+      ARGS=()
+      if [ -n "$ENDPOINTS" ]; then
+        ARGS+=(--endpoints "$ENDPOINTS")
+      else
+        ARGS+=(--endpoints "https://127.0.0.1:2379")
+      fi
+      if [ -s "$TLS_DIR/ca.pem" ] && [ -s "$TLS_DIR/server-cert.pem" ] && [ -s "$TLS_DIR/server-key.pem" ]; then
+        ARGS+=(--cacert "$TLS_DIR/ca.pem" --cert "$TLS_DIR/server-cert.pem" --key "$TLS_DIR/server-key.pem")
+      fi
+      exec /usr/local/bin/etcdctl "${ARGS[@]}" "$@"
+    owner: root
+    group: root
+    mode: '0755'
+
+# ─── nexus-etcd.service (DISABLED at bake) ───────────────────────────────
+- name: Install nexus-etcd.service systemd unit
+  ansible.builtin.template:
+    src: nexus-etcd.service.j2
+    dest: /etc/systemd/system/nexus-etcd.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Ensure nexus-etcd.service is disabled at bake
+  ansible.builtin.systemd:
+    name: nexus-etcd.service
+    enabled: false
+    daemon_reload: true
+
+# ─── Verify ──────────────────────────────────────────────────────────────
+- name: Verify etcd tooling
+  ansible.builtin.command: "{{ item }}"
+  changed_when: false
+  loop:
+    - /usr/local/bin/etcd --version
+    - /usr/local/bin/etcdctl version
+    - /usr/local/bin/etcdutl version
+  register: citus_etcd_verify
+
+- name: Show installed etcd versions
+  ansible.builtin.debug:
+    msg:
+      - "etcd:    {{ citus_etcd_verify.results[0].stdout_lines[0] }}"
+      - "etcdctl: {{ citus_etcd_verify.results[1].stdout_lines[0] }}"
+      - "etcdutl: {{ citus_etcd_verify.results[2].stdout_lines[0] }}"

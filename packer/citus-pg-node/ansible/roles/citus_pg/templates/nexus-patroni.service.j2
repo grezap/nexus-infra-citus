@@ -1,0 +1,38 @@
+[Unit]
+Description=Nexus Patroni (PostgreSQL {{ citus_pg_pg_major }} + Citus HA; Phase 0.P)
+Documentation=https://patroni.readthedocs.io/
+After=network-online.target citus-node-firstboot.service
+Wants=network-online.target
+Requires=citus-node-firstboot.service
+# Delivered DISABLED by the citus_pg Packer role. The terraform
+# role-overlay-citus-patroni.tf renders /etc/patroni/patroni.yml (per-scope:
+# citus-coord / citus-worker1 / citus-worker2; etcd3 DCS endpoints + TLS;
+# postgresql.parameters incl. shared_preload_libraries='citus'), the
+# citus-tls overlay has already rendered the leaf cert + key + CA under
+# /etc/nexus-citus/tls, then the patroni-bootstrap overlay enables + starts
+# this unit across each scope's pair and waits for a leader.
+ConditionPathExists=/etc/patroni/patroni.yml
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+# Patroni runs initdb into the Patroni-managed PGDATA + drives PG; it needs to
+# read its config + TLS material + write PGDATA (all postgres-owned).
+ExecStart={{ citus_pg_patroni_venv }}/bin/patroni /etc/patroni/patroni.yml
+ExecReload=/bin/kill -HUP $MAINPID
+# Patroni traps SIGTERM and shuts PostgreSQL down gracefully (checkpoint +
+# fast stop). Give it room; a busy PG can take a while to checkpoint.
+KillMode=process
+KillSignal=SIGINT
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+StandardOutput=append:{{ citus_pg_log_dir }}/patroni.log
+StandardError=append:{{ citus_pg_log_dir }}/patroni.log
+
+[Install]
+WantedBy=multi-user.target

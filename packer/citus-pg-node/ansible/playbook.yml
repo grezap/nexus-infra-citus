@@ -1,0 +1,20 @@
+---
+- name: Configure citus-pg-node template (Phase 0.P)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    citus_pg_pg_major: "{{ citus_pg_pg_major | default(17) }}"
+    citus_pg_citus_version: "{{ citus_pg_citus_version | default('13.0') }}"
+    citus_pg_patroni_version: "{{ citus_pg_patroni_version | default('4.0.5') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - citus_firstboot
+    - citus_pg

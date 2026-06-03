@@ -1,0 +1,7 @@
+---
+citus_etcd_version: "3.5.16"
+citus_etcd_user: etcd
+citus_etcd_group: etcd
+citus_etcd_config_dir: /etc/nexus-etcd
+citus_etcd_data_dir: /var/lib/nexus-etcd
+citus_etcd_log_dir: /var/log/nexus-etcd

@@ -1,0 +1,21 @@
+---
+# citus_pg role defaults (Phase 0.P). All vars role-prefixed per the 0.O CI
+# ansible-lint var-naming[no-role-prefix] lesson.
+citus_pg_pg_major: 17
+citus_pg_citus_version: "13.0"
+citus_pg_patroni_version: "4.0.5"
+
+# Patroni pip venv (a pinned recent Patroni with etcd3-over-TLS DCS support;
+# Debian's apt patroni is older + its etcd3 TLS story is patchier).
+citus_pg_patroni_venv: /opt/patroni-venv
+
+# Identity / state dirs (group citus; firstboot writes node-identity.env here).
+citus_pg_config_dir: /etc/nexus-citus
+citus_pg_state_root: /var/lib/nexus-citus
+citus_pg_pgdata: /var/lib/nexus-citus/pgdata
+citus_pg_log_dir: /var/log/nexus-citus
+
+# Citus community apt repo (packagecloud). deb.sh auto-detects the distro
+# codename; we add the source explicitly with a bookworm fallback if the
+# running codename has no Citus Release file yet.
+citus_pg_citus_repo_codename_fallback: bookworm

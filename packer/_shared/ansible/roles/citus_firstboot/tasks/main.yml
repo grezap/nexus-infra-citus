@@ -1,0 +1,34 @@
+---
+# citus_firstboot -- shared role that installs the Citus-tier firstboot
+# script + systemd unit on every per-engine template (citus-{etcd,tablet,
+# gate}-node).
+#
+# The firstboot script (files/citus-node-firstboot.sh) is role-agnostic: it
+# does NIC discovery + IP->hostname mapping across ALL Citus-tier IPs
+# (etcd .190-.192, control .193, vtgate .194/.195, tablets .196-.201). A clone
+# landing on any of those IPs self-identifies; an unmapped IP fails fast.
+#
+# The systemd unit (templates/citus-node-firstboot.service.j2) gates on the
+# firstboot done-marker so the script runs exactly once per clone.
+
+- name: Install citus-node-firstboot.sh
+  ansible.builtin.copy:
+    src: citus-node-firstboot.sh
+    dest: /usr/local/sbin/citus-node-firstboot.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install citus-node-firstboot.service systemd unit
+  ansible.builtin.template:
+    src: citus-node-firstboot.service.j2
+    dest: /etc/systemd/system/citus-node-firstboot.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable citus-node-firstboot.service (runs once on first clone boot)
+  ansible.builtin.systemd:
+    name: citus-node-firstboot.service
+    enabled: true
+    daemon_reload: true

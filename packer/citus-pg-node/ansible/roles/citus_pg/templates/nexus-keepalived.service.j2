@@ -1,0 +1,33 @@
+[Unit]
+Description=Nexus keepalived (VRRP VIP for the Patroni group leader; Phase 0.P)
+Documentation=https://www.keepalived.org/
+After=network-online.target citus-node-firstboot.service nexus-patroni.service
+Wants=network-online.target nexus-patroni.service
+Requires=citus-node-firstboot.service
+# Delivered DISABLED by the citus_pg Packer role. The terraform
+# role-overlay-citus-patroni.tf renders /etc/keepalived/keepalived.conf (per
+# Patroni group: unicast VRRP between the group's two PG nodes; the
+# vrrp_script probes the LOCAL Patroni REST /leader, which returns HTTP 200
+# only on the leader, so the VIP floats to the current leader on failover),
+# then enables + starts this unit on both nodes of the group.
+ConditionPathExists=/etc/keepalived/keepalived.conf
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+Type=simple
+User=root
+Group=root
+# -n: don't fork (systemd-friendly). -l: log to stderr. The vrrp_script in
+# the rendered config curls https://127.0.0.1:8008/leader; needs the venv-less
+# curl + the CA bundle, both present on the image.
+ExecStart=/usr/sbin/keepalived -n -l -f /etc/keepalived/keepalived.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{{ citus_pg_log_dir }}/keepalived.log
+StandardError=append:{{ citus_pg_log_dir }}/keepalived.log
+
+[Install]
+WantedBy=multi-user.target
