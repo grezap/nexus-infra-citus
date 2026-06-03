@@ -1,268 +1,218 @@
-# nexus-infra-vitess — Operator Handbook (Phase 0.O)
+# nexus-infra-citus — Operator Handbook (Phase 0.P)
 
-Vitess-sharded MySQL cluster: a horizontally-sharded relational database tier
-(keyspace `commerce`, 2 shards, hash vindex) built on Percona Server 8.4 LTS
-tablets fronted by Vitess v24.0.1 (vtgate / vttablet / vtctld / VTOrc), with an
-etcd 3.5 topology service and **full Vault-PKI mTLS** on every gRPC channel, the
-mysqld wire, and the vtgate MySQL listener. This is the relational **sharding**
-axis of the NexusPlatform OLTP story (contrast 0.G.4 Patroni = PG HA-by-
-replication; 0.N Mongo = document sharding; 0.O Vitess = MySQL sharding).
+Citus-sharded PostgreSQL with full Patroni HA (ADR-0042). 9 VMs + 3 VRRP VIPs,
+tier `08-citus`:
 
-Canon: `nexus-platform-plan/MASTER-PLAN.md` (Phase 0.O) · `docs/adr/ADR-0041`
-(topology) · `docs/infra/vms.yaml` (cluster `vitess`).
+| Role | Hosts | VMnet11 | VIP |
+|---|---|---|---|
+| etcd DCS | citus-etcd-1/2/3 | .202/.203/.204 | — |
+| coordinator Patroni pair | citus-coord-1/2 | .205/.206 | .211 (coord.citus.nexus.lab) |
+| worker-1 Patroni pair | citus-worker1-1/2 | .207/.208 | .212 (worker1.citus.nexus.lab) |
+| worker-2 Patroni pair | citus-worker2-1/2 | .209/.210 | .213 (worker2.citus.nexus.lab) |
+
+This handbook is a from-absolute-zero replay guide. No external knowledge is
+required to rebuild the tier.
 
 ---
 
 ## §0 Prerequisites — what must already exist
 
 ### §0.1 Build-host tooling
+
 - Windows 11 build host, PowerShell 7+ (`pwsh`).
-- Terraform ≥ 1.9, Packer ≥ 1.11, VMware Workstation (vmrun at
-  `C:/Program Files/VMware/VMware Workstation/vmrun.exe` — **non-(x86)**; see
-  the cross-tier lesson `feedback_vmrun_path_moved_nonx86`).
-- OpenSSH client (`ssh`/`scp`) on PATH.
-- `H:\VMS\ISO\debian-13.5.0-amd64-netinst.iso`.
+- `packer` ≥ 1.11, `terraform` ≥ 1.9, `vmrun.exe` at the non-`(x86)` path
+  `C:\Program Files\VMware\VMware Workstation\vmrun.exe`.
+- `ssh` / `scp` (OpenSSH) on PATH; key `~/.ssh/nexus_gateway_ed25519` works for
+  `nexusadmin@<vmnet11-ip>` (or password `nexusadmin` fallback).
+- Debian 13.5 netinst ISO at `H:\VMS\ISO\debian-13.5.0-amd64-netinst.iso`.
 
-### §0.2 Foundation tier alive (6-VM base)
-The always-on base must be up + healthy before anything here:
+### §0.2 Foundation tier alive (6-VM base) + Vault unsealed
 
-| VM | IP | Verify |
-|----|----|--------|
-| nexus-gateway | 192.168.70.1 | `ssh nexusadmin@192.168.70.1 "sudo systemctl is-active dnsmasq"` |
-| dc-nexus | 192.168.70.10 | AD DS reachable |
-| vault-1/2/3 | .121/.122/.123 | `vault status` → sealed=false, one `role=active` |
-| vault-transit | .124 | `vault status` → sealed=false |
+`vmrun list` must show the 6-VM foundation base running:
+`nexus-gateway` + `dc-nexus` + `vault-1/2/3` + `vault-transit`. Confirm Vault is
+unsealed:
 
-Host networking invariant: VMnet11 host adapter = `192.168.70.254`, VMnet10 =
-`192.168.10.254` (Virtual Network Editor; see `feedback_vmnet_host_adapter_ip_reset`).
-After any host reboot recover in order: **(1) VMnet adapters → .254 (admin) →
-(2) `nexus-infra-vmware/scripts/recover-vault-ha.ps1` → (3) confirm vmrun path**.
+```pwsh
+ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.121 `
+  "export VAULT_ADDR=https://127.0.0.1:8200; export VAULT_SKIP_VERIFY=1; vault status | grep -i sealed"
+# Sealed   false
+```
 
-### §0.3 Cross-repo state this tier reads
-1. **dnsmasq dhcp-host reservations** for the 12 vitess MACs `:CB`–`:D6` →
-   `.190`–`.201`. Written by `nexus-infra-vmware` foundation env overlay
-   `role-overlay-gateway-vitess-reservations.tf`. Run **first**:
-   ```pwsh
-   pwsh -File nexus-infra-vmware\scripts\foundation.ps1 apply
-   ```
-   (Defaults are all `true` = steady state; a plain apply adds the vitess pins
-   and preserves every other tier. `terraform plan` should read
-   `1 to add, 0 to change, 0 to destroy`.)
-2. **Vault PKI role + cluster creds + AppRoles**. Written by `nexus-infra-vmware`
-   security env overlays (`role-overlay-vault-pki-vitess.tf`,
-   `role-overlay-vault-vitess-cluster-creds-seed.tf`,
-   `role-overlay-vault-agent-vitess-{policies,approles}.tf`). Run **second**:
-   ```pwsh
-   pwsh -File nexus-infra-vmware\scripts\security.ps1 apply
-   ```
-   This creates the `vitess-server` PKI role, sticky-seeds the 5 KV creds at
-   `nexus/vitess/{mysql-root,mysql-app,mysql-allprivs,mysql-repl,vtorc-topo}-password`,
-   writes the 12 narrow policies + 12 AppRoles, and drops the 12 per-host JSON
-   sidecars at `~/.nexus/vault-agent-vitess-vitess-<host>.json`.
-3. CA bundle `~/.nexus/vault-ca-bundle.crt` (from earlier foundation PKI work).
+If a host reboot sealed Vault, recover via
+`nexus-infra-vmware/scripts/recover-vault-ha.ps1` before proceeding.
+
+### §0.3 Cross-repo state this tier reads (nexus-infra-vmware)
+
+Two `nexus-infra-vmware` envs must be applied FIRST (they write gateway pins +
+Vault PKI/creds/sidecars this repo consumes):
+
+**foundation env** — writes:
+- 9 dnsmasq dhcp-host pins for the citus MACs `:D7`–`:DF` → `.202`–`.210`
+  (`role-overlay-gateway-citus-reservations.tf`, default
+  `enable_citus_dhcp_reservations=true`).
+- 3 VIP DNS host-records `coord/worker1/worker2.citus.nexus.lab` → `.211/.212/.213`
+  (`role-overlay-gateway-citus-dns.tf`).
+
+```pwsh
+pwsh -File ..\nexus-infra-vmware\scripts\foundation.ps1 apply
+```
+
+**security env** — writes:
+- PKI role `citus-server` (`pki_int/issue/citus-server`, server+client EKU, 90d,
+  allowed_domains = 9 hosts ×3 forms + 3 VIP DNS names + localhost, allow_ip_sans).
+- 4 KV sticky-seeds at `nexus/citus/{superuser,replication,patroni-restapi,citus-app}-password`.
+- 9 narrow Vault policies + 9 AppRoles + the 9 sidecars at
+  `$HOME\.nexus\vault-agent-citus-<host>.json` (this repo's vault-agents overlay
+  reads these — ERROR if absent).
+- The CA bundle at `$HOME\.nexus\vault-ca-bundle.crt`.
+
+```pwsh
+pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 apply
+```
 
 ### §0.4 Templates built (see §1.1)
-The 3 per-engine Packer templates must exist under `H:\VMS\NexusPlatform\_templates\`:
-`vitess-etcd-node`, `vitess-gate-node`, `vitess-tablet-node`.
+
+`H:\VMS\NexusPlatform\_templates\citus-etcd-node\citus-etcd-node.vmx` and
+`...\citus-pg-node\citus-pg-node.vmx` must exist.
 
 ---
 
 ## §1 Phase walkthrough — from absolute zero
 
 ### §1.1 Build the Packer templates
-Per-engine templates (one per role) per `feedback_per_cluster_state_per_engine_template`.
+
 ```pwsh
-# all three (tablet first — riskiest: Percona 8.4 apt + Vitess tarball), ~30-45 min:
+# both (pg first — riskiest: PG 17 + Citus apt + Patroni venv + keepalived), ~30-45 min:
 pwsh -File scripts\build-templates.ps1
 # or one at a time:
-pwsh -File scripts\build-templates.ps1 -Only tablet
-pwsh -File scripts\build-templates.ps1 -Only gate
+pwsh -File scripts\build-templates.ps1 -Only pg
 pwsh -File scripts\build-templates.ps1 -Only etcd
 ```
-Each runs `packer build -force -var iso_url=H:/VMS/ISO/debian-13.5.0-amd64-netinst.iso`.
-Expected outputs: `H:\VMS\NexusPlatform\_templates\vitess-<role>-node\vitess-<role>-node.vmx`.
 
-> **Build-time fixes baked into source** (an operator rebuilding hits neither;
-> recorded for provenance, found at 0.O ratification 2026-06-02):
-> - **B1** — the tablet role created the `vitess` user with supplementary group
->   `mysql` *before* Percona (which creates that group) was installed →
->   `Group mysql does not exist`. Fixed: create the user with its primary group
->   only, add it to `mysql` *after* the Percona install.
-> - **B2** — Debian 13 / systemd 257 mounts `/tmp` as **tmpfs** (~½ build-RAM);
->   the full Vitess v24 tarball extracts to ~1.5 GB and overflowed it
->   (`No space left on device`). Fixed: download + extract the Vitess tarball
->   under `/var/tmp` (on the 60 GB root disk), not `/tmp`. Same family as the
->   0.G.4 vault-binary `/var/tmp` lesson. Applies to tablet + gate templates.
-
-What each bakes (binaries + **DISABLED** systemd units; the TF overlays render
-per-host config then enable + start):
-- **vitess-etcd-node** — etcd/etcdctl/etcdutl 3.5.16 + `nexus-etcd.service` (disabled)
-  + `/usr/local/sbin/nexus-etcdctl` wrapper.
-- **vitess-tablet-node** — Percona Server 8.4 LTS (apt `ps-84-lts`; `mysql.service`
-  masked — Vitess `mysqlctld` owns mysqld) + Vitess v24.0.1 `vttablet`/`mysqlctl`/
-  `mysqlctld`/`vtctldclient` + `nexus-mysqlctld.service` + `nexus-vttablet.service`
-  (disabled).
-- **vitess-gate-node** — Vitess v24.0.1 `vtgate`/`vtctld`/`vtorc`/`vtctldclient`
-  + `nexus-vtgate/vtctld/vtorc.service` (disabled). Serves BOTH the 2 vtgate
-  routers AND the control node.
+- `citus-etcd-node`: etcd 3.5.x upstream static binary (the Patroni DCS),
+  `nexus-etcd.service` DISABLED, `nexus-etcdctl` wrapper.
+- `citus-pg-node`: PostgreSQL 17 (Debian trixie native) + Citus 13.x (Citus
+  community apt repo) + Patroni 4.x (pip venv, etcd3 + psycopg2) + keepalived;
+  Debian's auto `main` cluster dropped + `postgresql` units masked;
+  `nexus-patroni.service` + `nexus-keepalived.service` DISABLED.
 
 ### §1.2 Cross-env operator order (HARD ordering)
-1. `nexus-infra-vmware` **foundation apply** (writes the 12 dhcp pins) — §0.3.1.
-2. `nexus-infra-vmware` **security apply** (PKI + creds + sidecars) — §0.3.2.
-3. **this repo** vitess apply — §1.3.
-The local apply reads the dhcp pins (so clones DHCP into `.190`–`.201`) and the
-12 sidecars (so each Vault Agent can AppRole-login). Both MUST exist first.
+
+```
+nexus-infra-vmware  foundation apply   (pins + VIP DNS)
+nexus-infra-vmware  security   apply   (PKI role + KV creds + 9 AppRole sidecars)
+nexus-infra-citus   citus.ps1 apply    (this repo: clones + bring-up graph)
+```
+
+The citus apply ERRORs early ("creds file … missing") if the security sidecars
+aren't present — that's the cross-env guard, not a bug.
 
 ### §1.3 Apply
+
 ```pwsh
-# FIRST 12-VM apply: -parallelism=3 to avoid the vmrun power-on storm (lesson N10).
-pwsh -File scripts\vitess.ps1 apply               # defaults to -parallelism=3
+# FIRST 9-VM apply: -parallelism=3 to avoid the vmrun power-on storm (lesson N10).
+pwsh -File scripts\citus.ps1 apply
 # overlay-only re-applies once the VMs exist can use full parallelism:
-pwsh -File scripts\vitess.ps1 apply -Parallelism 10
+pwsh -File scripts\citus.ps1 apply -Parallelism 10
 ```
-Apply-graph (terraform orders by `depends_on`, not file name — Vitess bring-up is
-NOT linear):
+
+Apply graph (within `terraform/envs/citus/`):
+
 ```
-12x module.vm clone + power-on  (-parallelism=3 batches)
-        │  firstboot per clone (NIC discovery, hostname, /etc/hosts, VMnet10, marker)
-        ▼
-role-overlay-vitess-nftables-backplane   (per-host ruleset; VMnet10 trust)
-        ▼
-role-overlay-vitess-vault-agents         (12x Vault Agent, AppRole login)
-        ▼
-role-overlay-vitess-tls                  (12x PKI leaf 3-file split + role KV creds)
-        ▼
-role-overlay-vitess-etcd-bootstrap       (3-member raft, full mTLS, leader+verify)
-        ▼
-role-overlay-vitess-gate :: vitess_vtctld   (EARLY: vtctld + AddCellInfo nexus
-                                             + nexus-vtctldclient wrapper)
-        ▼
-role-overlay-vitess-tablets              (6x: init_db.sql+ssl.cnf+mysqlctld.env+
-                                          vttablet.env; mysqld up; tablet registers)
-        ▼
-role-overlay-vitess-reparent             (per shard: SetKeyspaceDurabilityPolicy
-                                          semi_sync + PlannedReparentShard → 1P+2R)
-        ▼
-role-overlay-vitess-gate :: vitess_vtgate (2x) + vitess_vtorc (1x)   (LATE)
-        ▼
-role-overlay-vitess-schema               (ApplySchema customer + ApplyVSchema hash
-                                          vindex + seed via vtgate → BOTH shards)
+module.{etcd_*,coord_*,worker*_*}        9 clones (parallel, capped at -parallelism)
+  -> citus_nftables_backplane            per-cluster ruleset on all 9
+  -> citus_vault_agent  (x9)             Vault Agent per host (AppRole auth)
+  -> citus_tls          (x9)             leaf cert (+ pg: 4 KV creds, 0600 key); per-group VIP SAN
+  -> citus_etcd_bootstrap                3-member etcd, client-cert-auth, leader
+  -> citus_patroni_bootstrap             3 scopes: 1 leader + 1 replica each; shared_preload=citus
+  -> citus_keepalived   (x6)             per-group VIP follows the Patroni leader
+  -> citus_extension                     CREATE EXTENSION citus + add workers by VIP + citus_app
+  -> citus_distribute                    reference + distributed(32 shards) + colocated + seed + proof
 ```
-Wall-clock estimate: ~25–40 min for a clean from-zero apply at `-parallelism=3`.
 
 ### §1.4 Verify the exit gate
-```pwsh
-pwsh -File scripts\vitess.ps1 smoke
-# or: pwsh -File scripts\smoke-0.O.ps1
-# skip the destructive VTOrc reparent test: pwsh -File scripts\smoke-0.O.ps1 -SkipReparentTest
-```
-~55 checks across 10 sections: reachability · engine+ports · etcd quorum ·
-control plane (vtctld/VTOrc/cell) · per-shard 1P+2R · vtgate routing · sharding
-proof (customer rows on BOTH shards) · mTLS verify · VTOrc auto-reparent-on-
-primary-kill. Expected final line: `ALL 0.O SMOKE CHECKS PASSED`.
 
-Manual spot-checks:
 ```pwsh
-# topology
-ssh nexusadmin@192.168.70.193 "sudo /usr/local/sbin/nexus-vtctldclient GetTablets --keyspace commerce"
-# sharded query via vtgate (run from a tablet — it has the mysql client)
-ssh nexusadmin@192.168.70.196 "APP=\$(sudo cat /etc/nexus-vitess/mysql-app-password); mysql -h 192.168.70.194 -P 15306 -u nexus -p\$APP --ssl-mode=REQUIRED commerce -e 'SELECT COUNT(*) FROM customer'"
-# web UIs: vtctld http://192.168.70.193:15000 · VTOrc :16000 · vtgate :15001 · vttablet :15101
+pwsh -File scripts\citus.ps1 smoke
+# or: pwsh -File scripts\smoke-0.P.ps1
+# skip the destructive worker-failover test: pwsh -File scripts\smoke-0.P.ps1 -SkipFailoverTest
+```
+
+Useful manual probes (run from a coordinator node):
+
+```bash
+# Patroni topology per scope
+sudo /usr/local/sbin/nexus-patronictl list citus-coord
+sudo /usr/local/sbin/nexus-patronictl list citus-worker1
+# Citus cluster membership
+sudo -u postgres psql -h /var/run/nexus-citus -U postgres -d citus -c "SELECT * FROM pg_dist_node ORDER BY groupid"
+# shard placement (sharding proof)
+sudo -u postgres psql -h /var/run/nexus-citus -U postgres -d citus -c "SELECT nodename, count(*) FROM citus_shards WHERE table_name='events'::regclass GROUP BY nodename"
+# cross-shard aggregate
+sudo -u postgres psql -h /var/run/nexus-citus -U postgres -d citus -c "SELECT count(*) FROM events"
 ```
 
 ### §1.5 Iterating (selective ops)
-Every overlay + every VM has an `enable_*` toggle (steady-state default `true`).
-Pass the OPT-OUTS you want each apply (`-Vars` replaces the var set —
-`feedback_terraform_partial_apply_destroys_resources`):
+
 ```pwsh
-# stand up only the VMs + base plane (no tablets/reparent/gate/schema) — useful
-# to verify Vitess flags against --help on a clone before the bring-up overlays:
-pwsh -File scripts\vitess.ps1 apply -Vars "enable_vitess_tablets=false,enable_vitess_reparent=false,enable_vitess_gate=false,enable_vitess_schema=false"
-# iterate on just the schema overlay (rest already up):
-terraform -chdir=terraform\envs\vitess apply -auto-approve   # all defaults true
-# bring up a single shard's tablets only:
-pwsh -File scripts\vitess.ps1 apply -Vars "enable_vitess_shard2_tablet_1=false,enable_vitess_shard2_tablet_2=false,enable_vitess_shard2_tablet_3=false"
+# stand up only the VMs + base plane (no Citus wiring) — useful to inspect
+# Patroni/PG on a clone before the extension/distribute overlays:
+pwsh -File scripts\citus.ps1 apply -Vars "enable_citus_extension=false,enable_citus_distribute=false"
+# iterate on just the distribute overlay (rest already up):
+cd terraform\envs\citus; terraform apply -auto-approve -replace="null_resource.citus_distribute[0]"
+# bring up only one Patroni group's nodes:
+pwsh -File scripts\citus.ps1 apply -Vars "enable_worker2_1=false,enable_worker2_2=false"
 ```
 
 ### §1.6 Tear down
+
 ```pwsh
-pwsh -File scripts\vitess.ps1 destroy
+pwsh -File scripts\citus.ps1 destroy
 ```
-Destroys the 12 clones + runs the per-overlay destroy provisioners (stop services,
-remove rendered config). **Survives**: the gateway dhcp reservations, the Vault
-PKI role + KV creds + AppRoles (cross-repo state in nexus-infra-vmware). A fresh
-apply re-clones + re-renders from those.
 
 ---
 
 ## §2 Phase status
 
-| Sub-phase | Scope | Closed | Smoke |
-|-----------|-------|--------|-------|
-| 0.O | Vitess-sharded MySQL (12 VMs, 2 shards, full mTLS, VTOrc) | **LIVE-RATIFIED 2026-06-03** | smoke-0.O.ps1 **71/71 GREEN** (incl. VTOrc reparent-on-kill + sharding proof + mTLS verify) |
+| Sub-phase | State |
+|---|---|
+| Templates (etcd + pg) | _to be filled at ratification_ |
+| Live ratification (smoke ALL GREEN) | _to be filled_ |
+| Cold-rebuild proof | _to be filled_ |
 
 ---
 
 ## §3 Operator runbooks
 
 ### §3.1 Cold-rebuild canon
-The proof that the tier rebuilds from absolute zero with zero hot state:
+
 ```pwsh
 # 1. (optional) rebuild templates to bake any firstboot/role fixes:
 pwsh -File scripts\build-templates.ps1
 # 2. destroy:
-pwsh -File scripts\vitess.ps1 destroy
+pwsh -File scripts\citus.ps1 destroy
 # 3. cross-env regen (idempotent; re-asserts pins + regenerates AppRole secret-ids):
-pwsh -File nexus-infra-vmware\scripts\foundation.ps1 apply
-pwsh -File nexus-infra-vmware\scripts\security.ps1 apply
+pwsh -File ..\nexus-infra-vmware\scripts\foundation.ps1 apply
+pwsh -File ..\nexus-infra-vmware\scripts\security.ps1   apply
 # 4. from-zero apply (vmrun-storm-safe):
-pwsh -File scripts\vitess.ps1 apply        # -parallelism=3
+pwsh -File scripts\citus.ps1 apply
 # 5. smoke ALL GREEN:
-pwsh -File scripts\vitess.ps1 smoke
+pwsh -File scripts\citus.ps1 smoke
 ```
 
-### §3.x Transient table — the 0.O ratification gauntlet (2026-06-02)
+### §3.x Transient table — the 0.P ratification gauntlet
 
-All fixed in source; a cold rebuild hits none of them. Two host reboots occurred
-during ratification (each needed the §0.2 recovery: VMnet adapters were already
-.254, vault-HA re-recovered, 12 VMs powered back on + firstboot-ready).
+_To be filled during live ratification (symptom → diagnosis → fix-in-source)._
 
-**Build-time (Packer):**
+### §3.y Recovery notes
 
-| # | Symptom | Fix |
-|---|---------|-----|
-| B1 | tablet build fails `Group mysql does not exist` | vitess user added to `mysql` group AFTER Percona installs it (was before). |
-| B2 | tablet build `No space left on device` unpacking Vitess tarball | Debian 13/systemd tmpfs `/tmp` (~½ RAM) too small for the ~1.5 GB extract → download+extract under `/var/tmp`. |
-| B3 | tablet build exit 127, `mysqld: not found` | post-install spot-check called bare `mysqld` (in `/usr/sbin`, off PATH) → full path `/usr/sbin/mysqld`. |
-
-**Apply-time:**
-
-| # | Symptom | Diagnosis | Fix |
-|---|---------|-----------|-----|
-| T0 | vault reads `connection refused` :8200 | vault-transit boot race after host reboot | `recover-vault-ha.ps1` (×2 this session). [[vault-transit-boot-race-recovery]] |
-| T1 | `terraform apply` Invalid-function-arg in schema locals | `one(keys(vtgate_nodes))` asserts ≤1 elem (2 vtgates) | use `values(...)[0]` for "first vtgate". |
-| T2 | all 12 clones `configure-vm-nic.ps1 not recognized` | repo bootstrap copied `modules/vm` but not `scripts/configure-vm-nic.ps1` | copy the script into the repo. |
-| T3 | etcd firstboot fails `chown: invalid group 'root:vitess'` | etcd template creates only the `etcd` group, but firstboot chowns node-identity to `vitess` | add `vitess` group to the etcd role. |
-| T4 | etcd won't start, `server-cert.pem: no such file` | TLS overlay rendered all certs to `/etc/nexus-vitess/tls`, but etcd uses `/etc/nexus-etcd/tls` + runs as user `etcd` | role-aware TLS dirs (etcd→`/etc/nexus-etcd/tls` group etcd); destroy uses `lookup()` for back-compat. |
-| T5 | vtctld gRPC never answers; wrapper `unknown flag: --grpc-ca` | `vtctldclient` connects with `--vtctld-grpc-*`, not the server-side `--grpc-*` | fix wrapper flags + add `--vtctld-grpc-server-name`. |
-| T6 | reparent PRS `error reading server preface: EOF` | vtctld dials tablets' tabletmanager over mTLS but had no client cert | add `--tablet-manager-grpc-{ca,cert,key}` to vtctld. |
-| T7 | tablets have **no vt_* users**; later `unsupported auth method: sha256_password` | `init_db.sql` first write hit `super_read_only` (errno 1290) → aborted; users never created | `init_db.sql` sets `super_read_only=OFF` first; users `IDENTIFIED WITH mysql_native_password` (+ `mysql_native_password=ON` in cnf). Wipe+re-init datadirs (live only; cold-rebuild starts empty). |
-| T8 | tablet overlay hangs on mysqld-readiness | `mysqladmin ping` (no creds) returned "Access denied" once init_db set a root password; probe only matched "mysqld is alive" | accept "Access denied" as up (server responded). |
-| T9 | seed to vtgate `Lost connection ... reading authorization packet` | vtgate MySQL listener requires mTLS (client cert); seed presented none | seed/smoke connect with `--ssl-cert/--ssl-key/--ssl-ca` (+ `sudo` for the 0640 key). |
-| T10 | seed write times out 30s (errno 3024); replica IO `equal server ids`, Source_Host 127.0.0.1 | `--db-host 127.0.0.1` made Vitess advertise 127.0.0.1 as the tablet's MySQL host → replicas self-replicate; `semi_sync` durability blocked writes (semisync plugin not loaded) | drop `--db-host/--db-port` (Vitess advertises the VMnet10 host; replication flows); durability `none` (semi-sync + `plugin-load` is the 0.O.1 hardening). |
-| T11 | smoke probe flakes (vtgate SELECT 1, VERIFY_CA, etcd put/get) | ssh output has trailing `\r` (strict `(?m)^1$` won't match `1\r`); mysql stderr warnings polluted parses; `$(date +%s)` ran on Windows PS | CR-tolerant predicates; `2>/dev/null` on mysql; static etcd value. |
-
-### §3.1a — Cold-rebuild proof (2026-06-03)
-PROVEN: rebuilt etcd template (bakes the `vitess` group, T3) → `vitess.ps1 destroy`
-→ single `vitess.ps1 apply` (all defaults true, `-parallelism=3`) →
-`Apply complete! Resources: 86 added, 0 changed, 0 destroyed` with **zero
-transients** → `vitess.ps1 smoke` **71/71 GREEN** (incl. VTOrc reparent: killed
-nexus-100, VTOrc promoted nexus-101). Confirms every B1–B3/T0–T12 fix lives in
-source; the cross-repo prerequisites (dhcp pins, `vitess-server` PKI, 12 AppRole
-sidecars) survived the destroy as designed.
-
-### §3.1b — Live-ratification cold-state note
-The live ratification ran the bring-up in two stages (base plane with
-`-Vars enable_vitess_{tablets,reparent,gate,schema}=false`, then full) to isolate
-the Vitess flag layer; a clean cold rebuild runs a single `apply` (all defaults
-true).
+- **Vault sealed after host reboot** → `recover-vault-ha.ps1`, then re-run the
+  citus vault-agents overlay (`terraform apply -replace` the affected
+  `null_resource.citus_vault_agent[...]`).
+- **A worker VIP not bound** → check `systemctl status nexus-keepalived` +
+  `sudo /usr/local/sbin/nexus-patronictl list <scope>`; the VIP only binds on the
+  current leader (the `vrrp_script` curls REST `/leader`).
+- **Coordinator can't reach a worker** (`citus_add_node` errors) → confirm the
+  worker VIP is bound + the worker's cert covers the VIP DNS name/IP (it does by
+  construction) + `~postgres/.pgpass` holds the superuser password on the
+  coordinator leader.
