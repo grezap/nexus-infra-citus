@@ -51,7 +51,7 @@ resource "null_resource" "citus_keepalived" {
     vrid         = each.value.vrid
     instance     = each.value.instance
     peer_ip      = each.value.peer
-    keepalived_v = "1" # v1 (0.P) = per-group unicast VRRP; VIP follows Patroni leader via /leader vrrp_script (weight +50).
+    keepalived_v = "2" # v2 (0.P) = removed nopreempt so the VIP follows the Patroni leader on failover (T6); v1 stranded the VIP on a demoted replica. Per-group unicast VRRP; /leader vrrp_script weight +50.
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.citus_node_user
@@ -126,7 +126,12 @@ vrrp_instance $instance {
   virtual_router_id $vrid
   priority      100
   advert_int    1
-  nopreempt
+  # NO nopreempt: the VIP MUST follow the Patroni leader. The leader's
+  # vrrp_script (/leader -> 200) adds weight +50 -> priority 150; the follower
+  # stays 100. Preemption lets the 150-node take the VIP, and on failover the
+  # newly-promoted leader (150) preempts the old one (drops to 100). nopreempt
+  # would pin the VIP to whoever was MASTER first -- it stranded the VIP on a
+  # demoted replica after a failover (0.P ratification transient T6).
 
   # Unicast VRRP -- VMware VMnet11 multicast doesn't reliably forward between
   # guests (0.G.3 transient #22). Advertisements go directly to the peer.

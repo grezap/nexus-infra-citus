@@ -8,7 +8,7 @@
   vars:
     target_user: "{{ target_user | default('nexusadmin') }}"
     citus_pg_pg_major: "{{ citus_pg_pg_major | default(17) }}"
-    citus_pg_citus_version: "{{ citus_pg_citus_version | default('13.0') }}"
+    citus_pg_citus_version: "{{ citus_pg_citus_version | default('14.1') }}"
     citus_pg_patroni_version: "{{ citus_pg_patroni_version | default('4.0.5') }}"
 
   roles:

@@ -23,7 +23,7 @@ NexusPlatform phase cadence.
   the Patroni DCS, `nexus-etcd.service` DISABLED, `nexus-etcdctl` operator
   wrapper.
 - **`citus-pg-node`** Packer template: PostgreSQL 17 (Debian trixie native) +
-  Citus 13.x (Citus community apt repo) + Patroni 4.x (pip venv, etcd3 DCS +
+  Citus 14.x (Citus community apt repo) + Patroni 4.x (pip venv, etcd3 DCS +
   psycopg2) + keepalived. Debian's auto `main` cluster dropped + `postgresql`
   units masked (Patroni owns the lifecycle); `nexus-patroni.service` +
   `nexus-keepalived.service` delivered DISABLED (config-gated); stock

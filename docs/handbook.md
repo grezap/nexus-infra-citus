@@ -91,7 +91,7 @@ pwsh -File scripts\build-templates.ps1 -Only etcd
 
 - `citus-etcd-node`: etcd 3.5.x upstream static binary (the Patroni DCS),
   `nexus-etcd.service` DISABLED, `nexus-etcdctl` wrapper.
-- `citus-pg-node`: PostgreSQL 17 (Debian trixie native) + Citus 13.x (Citus
+- `citus-pg-node`: PostgreSQL 17 (Debian trixie native) + Citus 14.x (Citus
   community apt repo) + Patroni 4.x (pip venv, etcd3 + psycopg2) + keepalived;
   Debian's auto `main` cluster dropped + `postgresql` units masked;
   `nexus-patroni.service` + `nexus-keepalived.service` DISABLED.
@@ -202,7 +202,14 @@ pwsh -File scripts\citus.ps1 smoke
 
 ### §3.x Transient table — the 0.P ratification gauntlet
 
-_To be filled during live ratification (symptom → diagnosis → fix-in-source)._
+| # | Symptom | Diagnosis | Fix (in source) |
+|---|---|---|---|
+| T1 | `citus-pg-node` build fails: `No package matching 'postgresql-17-citus-13.0' is available` | (a) The Citus codename probe used `HEAD` + checked `status==200`, but packagecloud answers `dists/<cn>/Release` with a **302** to a signed S3 URL → probe saw 302, wrongly fell back to `bookworm`. (b) Even so, `13.0` is a bookworm-only version string; Debian **trixie**'s Citus repo publishes `postgresql-17-citus-{13.2,13.3,14.0,14.1}`. | Probe with `GET` + `follow_redirects: all` (final S3 GET = 200 → use the running codename `trixie`); bump `citus_version` default `13.0`→**`14.1`** (latest GA; avoid-EOL-optics, same principle as 0.O Percona 8.0→8.4). |
+| T2 | `citus-pg-node` build fails at "Verify patroni + patronictl binaries": `patronictl --version` → `Error: No such option '--version'` (rc=2). | `patroni` supports `--version`; **`patronictl` does not** (Click CLI with no top-level `--version`). The verify loop ran `--version` on both. | Split the verify: `patroni --version` only; confirm `patronictl` via `ansible.builtin.stat` (`executable`). |
+| T3 | `citus-pg-node` build fails at "Show installed versions": `debug` → `No first item, sequence was empty`. (ok=42 — all installs succeeded.) | The version-display did `... | map(attribute='stdout_lines') | map('first')`; **`keepalived --version` writes to STDERR**, so its `stdout_lines` is empty and `first` blows up. | `--version` only postgres + patroni (stdout); confirm keepalived via `stat` (its `--version` is checked combined-output in the Packer post-install); debug maps `stdout` not `stdout_lines\|first`. |
+| T4 | `citus_patroni_bootstrap` never converges; `nexus-patroni` exits 1 in a restart loop → `PatroniException: '/var/run/nexus-citus' ... couldn't create the directory` / `PermissionError [Errno 13]`. | Patroni runs as **postgres** but `/run` (=/var/run) is root-owned **tmpfs**; postgres can't mkdir its `unix_socket_directories`. (memory: systemd RuntimeDirectory for /var/run paths.) | Add `RuntimeDirectory=nexus-citus` + `RuntimeDirectoryMode=0755` to `nexus-patroni.service` (systemd creates `/run/nexus-citus` owned by `postgres` each start, durable across reboots). For clones predating the fix, the patroni-bootstrap overlay drops the same as an idempotent `…/nexus-patroni.service.d/10-runtimedir.conf` + `reset-failed` to clear the start-limit. |
+| T6 | Smoke §5/§9 fail: VIP REST `/leader` returns 000; after a worker failover the VIP is stranded on the **demoted replica** (queries to that worker break). | **Two faults.** (a) Smoke bug: `curl --cacert /etc/nexus-citus/tls/ca.pem` ran as `nexusadmin`, but `…/tls` is `0750 root:postgres` → can't traverse → `error setting certificate file` → 000. (b) Infra bug: `nopreempt` in the keepalived VRRP instance pinned the VIP to whoever was MASTER first, blocking the leader (priority 150 via the check weight) from taking it — so after a Patroni failover the VIP stayed on the old (now replica) node. | (a) `sudo curl` in the smoke VIP probes. (b) Remove `nopreempt` from the keepalived config so the leader preempts and the VIP follows leadership (bump `keepalived_v`→2). |
+| T5 | Coordinator scope: leader runs, but the **replica stays `stopped`**; `pg_basebackup … FATAL: connection requires a valid client certificate` + `no pg_hba.conf entry for replication … no encryption`. | The replication `hostssl … clientcert=verify-ca` rule requires the replica to present a CA-signed **client cert** over SSL, but Patroni's `primary_conninfo` (replication/rewind) carried no `sslcert`/`sslkey`/`sslmode`, so it connected without a cert (even falling back to no-encryption). | Add `sslmode: verify-ca` + `sslrootcert`/`sslcert`/`sslkey` (the node's own leaf) to the `superuser` + `replication` + `rewind` blocks under `postgresql.authentication` in `patroni.yml`. Switch the bring-up `systemctl start`→`restart` so the re-rendered conninfo is applied. |
 
 ### §3.y Recovery notes
 

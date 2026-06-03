@@ -190,7 +190,7 @@ foreach ($g in $groupVips) {
     Test-Check "VIP $($g.Vip) Patroni REST /leader returns 200 (leader holds VIP)" `
     {
         $leaderIp = $g.Nodes[0]
-        ssh @sshOpts "$user@$leaderIp" "curl -s -o /dev/null -w '%{http_code}' --cacert /etc/nexus-citus/tls/ca.pem https://$($g.Vip):8008/leader 2>/dev/null"
+        ssh @sshOpts "$user@$leaderIp" "sudo curl -s -o /dev/null -w '%{http_code}' --cacert /etc/nexus-citus/tls/ca.pem https://$($g.Vip):8008/leader 2>/dev/null"
     } `
     { param($o) $o -match '200' }
 }
@@ -265,7 +265,7 @@ if (-not $SkipFailoverTest) {
         { "old=$w1Leader new=$newLeader" } { param($o) $newLeader -and $newLeader -ne $w1Leader }
 
         Test-Check 'worker1 VIP still answers REST /leader=200 after failover' `
-        { ssh @sshOpts "$user@$($pgNodes[$newLeader])" "curl -s -o /dev/null -w '%{http_code}' --cacert /etc/nexus-citus/tls/ca.pem https://$Worker1Vip`:8008/leader 2>/dev/null" } `
+        { ssh @sshOpts "$user@$($pgNodes[$newLeader])" "sudo curl -s -o /dev/null -w '%{http_code}' --cacert /etc/nexus-citus/tls/ca.pem https://$Worker1Vip`:8008/leader 2>/dev/null" } `
         { param($o) $o -match '200' }
         Test-Check 'cross-shard aggregate still works after worker1 failover' `
         { Invoke-CoordSql "SELECT count(*) FROM events" } `

@@ -27,13 +27,13 @@ variable "iso_checksum" {
 variable "pg_major" {
   type        = number
   default     = 17
-  description = "PostgreSQL major version. Debian 13 (trixie) ships PostgreSQL 17 natively; Citus 13.x supports PG 17."
+  description = "PostgreSQL major version. Debian 13 (trixie) ships PostgreSQL 17 natively; Citus 14.x supports PG 15-17."
 }
 
 variable "citus_version" {
   type        = string
-  default     = "13.0"
-  description = "Citus extension version (the Citus apt package is postgresql-<pg_major>-citus-<citus_version>, e.g. postgresql-17-citus-13.0). Citus 13.x is the latest GA line supporting PG 17."
+  default     = "14.1"
+  description = "Citus extension version (the Citus apt package is postgresql-<pg_major>-citus-<citus_version>, e.g. postgresql-17-citus-14.1). Citus 14.1 is the latest GA line supporting PG 17 (Debian trixie's Citus repo publishes 13.2/13.3/14.0/14.1 for PG 17; 13.0/13.1 are bookworm-only). Latest-GA chosen for the same avoid-EOL-optics principle as the 0.O Vitess Percona 8.0->8.4 switch."
 }
 
 variable "patroni_version" {

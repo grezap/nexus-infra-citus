@@ -2,7 +2,7 @@
 # citus_pg role defaults (Phase 0.P). All vars role-prefixed per the 0.O CI
 # ansible-lint var-naming[no-role-prefix] lesson.
 citus_pg_pg_major: 17
-citus_pg_citus_version: "13.0"
+citus_pg_citus_version: "14.1"
 citus_pg_patroni_version: "4.0.5"
 
 # Patroni pip venv (a pinned recent Patroni with etcd3-over-TLS DCS support;

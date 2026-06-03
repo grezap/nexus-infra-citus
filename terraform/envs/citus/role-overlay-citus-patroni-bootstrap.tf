@@ -153,12 +153,24 @@ postgresql:
     superuser:
       username: postgres
       password: __SUPER_PWD__
+      sslmode: verify-ca
+      sslrootcert: /etc/nexus-citus/tls/ca.pem
+      sslcert: /etc/nexus-citus/tls/server-cert.pem
+      sslkey: /etc/nexus-citus/tls/server-key.pem
     replication:
       username: replicator
       password: __REPL_PWD__
+      sslmode: verify-ca
+      sslrootcert: /etc/nexus-citus/tls/ca.pem
+      sslcert: /etc/nexus-citus/tls/server-cert.pem
+      sslkey: /etc/nexus-citus/tls/server-key.pem
     rewind:
       username: rewind
       password: __REPL_PWD__
+      sslmode: verify-ca
+      sslrootcert: /etc/nexus-citus/tls/ca.pem
+      sslcert: /etc/nexus-citus/tls/server-cert.pem
+      sslkey: /etc/nexus-citus/tls/server-key.pem
   parameters:
     unix_socket_directories: /var/run/nexus-citus
     ssl: "on"
@@ -208,6 +220,13 @@ fi
 sudo install -m 0640 -o postgres -g postgres "`$TMP" /etc/patroni/patroni.yml
 rm -f "`$TMP"
 
+# Ensure systemd creates the unix_socket_directories runtime dir owned by
+# postgres on every start. /run is tmpfs + root-owned, so Patroni (postgres)
+# cannot mkdir it. A baked unit predating the RuntimeDirectory fix is repaired
+# by this idempotent drop-in. (0.P ratification transient T4.)
+sudo mkdir -p /etc/systemd/system/nexus-patroni.service.d
+printf '[Service]\nRuntimeDirectory=nexus-citus\nRuntimeDirectoryMode=0755\n' | sudo tee /etc/systemd/system/nexus-patroni.service.d/10-runtimedir.conf > /dev/null
+
 # ~postgres/.pgpass for Citus inter-node + replication libpq auth (the
 # password half of mTLS; the cert half comes from citus.node_conninfo).
 # Citus forbids a password in node_conninfo, so libpq reads it from .pgpass.
@@ -218,6 +237,9 @@ sudo chown postgres:postgres "`$PGHOME/.pgpass"
 sudo chmod 0600 "`$PGHOME/.pgpass"
 
 sudo systemctl daemon-reload
+# Clear any start-limit/failed state from a prior failed bootstrap attempt so
+# the start below isn't rejected with "start request repeated too quickly".
+sudo systemctl reset-failed nexus-patroni.service 2>/dev/null || true
 sudo systemctl enable nexus-patroni.service
 echo CONFIG_OK
 "@
@@ -234,7 +256,10 @@ echo CONFIG_OK
         $nodes | ForEach-Object -ThrottleLimit 2 -Parallel {
           $n = $_
           $opts = @('-o','ConnectTimeout=10','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
-          ssh @opts "$using:sshUser@$($n.VmIp)" "sudo systemctl start nexus-patroni.service" 2>&1 | Out-Null
+          # restart (not start) so a re-rendered patroni.yml -- e.g. updated
+          # replication SSL conninfo -- is picked up on a bring-up re-run; on a
+          # fresh node Patroni isn't running yet so restart == start.
+          ssh @opts "$using:sshUser@$($n.VmIp)" "sudo systemctl restart nexus-patroni.service" 2>&1 | Out-Null
         }
 
         # ─── Stage 2: wait for 1 Leader + 1 streaming Replica ────────────────

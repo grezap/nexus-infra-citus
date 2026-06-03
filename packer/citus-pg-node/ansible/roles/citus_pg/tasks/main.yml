@@ -52,11 +52,17 @@
   register: citus_pg_codename
   changed_when: false
 
-- name: Probe whether the Citus repo has a Release file for the running codename
+- name: Probe whether the Citus repo publishes the running codename
+  # packagecloud answers the dists/<codename>/Release with a 302 to a signed S3
+  # URL, so follow_redirects=all is REQUIRED (a HEAD + no-follow returns 302 and
+  # would wrongly trigger the bookworm fallback -- 0.P build transient #1). The
+  # final S3 GET returns 200 when the codename is published.
   ansible.builtin.uri:
     url: "https://repos.citusdata.com/community/debian/dists/{{ citus_pg_codename.stdout }}/Release"
-    method: HEAD
-    status_code: [200, 404, 403]
+    method: GET
+    follow_redirects: all
+    return_content: false
+    status_code: [200, 403, 404]
   register: citus_pg_repo_probe
   failed_when: false
 
@@ -104,12 +110,15 @@
       - "psycopg2-binary"
     virtualenv: "{{ citus_pg_patroni_venv }}"
 
-- name: Verify patroni + patronictl binaries
-  ansible.builtin.command: "{{ citus_pg_patroni_venv }}/bin/{{ item }} --version"
+- name: Verify patroni --version (patronictl has no --version flag)
+  ansible.builtin.command: "{{ citus_pg_patroni_venv }}/bin/patroni --version"
   changed_when: false
-  loop:
-    - patroni
-    - patronictl
+
+- name: Verify patronictl binary is executable
+  ansible.builtin.stat:
+    path: "{{ citus_pg_patroni_venv }}/bin/patronictl"
+  register: citus_pg_patronictl
+  failed_when: not (citus_pg_patronictl.stat.exists and citus_pg_patronictl.stat.executable)
 
 # ─── keepalived (VRRP VIP per Patroni group) ──────────────────────────────
 - name: Install keepalived
@@ -190,15 +199,25 @@
     mode: '0755'
 
 # ─── Verify ──────────────────────────────────────────────────────────────
-- name: Verify PostgreSQL + Citus + Patroni tooling
-  ansible.builtin.command: "{{ item }}"
+# NB: postgres + patroni print --version to stdout; keepalived prints it to
+# STDERR (empty stdout) -- so we only --version the first two here and confirm
+# keepalived via stat (its --version is verified in the Packer post-install
+# combined-output check). A stdout-only map('first') over keepalived tripped on
+# the empty sequence. (0.P build transient #3.)
+- name: Verify PostgreSQL + Patroni --version (stdout)
+  ansible.builtin.command: "{{ item }} --version"
   changed_when: false
   loop:
-    - "/usr/lib/postgresql/{{ citus_pg_pg_major }}/bin/postgres --version"
-    - "{{ citus_pg_patroni_venv }}/bin/patroni --version"
-    - "/usr/sbin/keepalived --version"
+    - "/usr/lib/postgresql/{{ citus_pg_pg_major }}/bin/postgres"
+    - "{{ citus_pg_patroni_venv }}/bin/patroni"
   register: citus_pg_verify
+
+- name: Verify keepalived binary is executable
+  ansible.builtin.stat:
+    path: /usr/sbin/keepalived
+  register: citus_pg_keepalived
+  failed_when: not (citus_pg_keepalived.stat.exists and citus_pg_keepalived.stat.executable)
 
 - name: Show installed versions
   ansible.builtin.debug:
-    msg: "{{ citus_pg_verify.results | map(attribute='stdout_lines') | map('first') | list }}"
+    msg: "{{ citus_pg_verify.results | map(attribute='stdout') | list }}"

@@ -19,6 +19,13 @@ StartLimitIntervalSec=600
 Type=simple
 User=postgres
 Group=postgres
+# /run is tmpfs (root-owned, wiped on reboot); Patroni runs as postgres and
+# CANNOT mkdir /var/run/nexus-citus (its unix_socket_directories). RuntimeDirectory
+# makes systemd create /run/nexus-citus owned by User=postgres on every start --
+# durable across reboots. (memory: systemd RuntimeDirectory for /var/run paths;
+# 0.P ratification transient T4.)
+RuntimeDirectory=nexus-citus
+RuntimeDirectoryMode=0755
 # Patroni runs initdb into the Patroni-managed PGDATA + drives PG; it needs to
 # read its config + TLS material + write PGDATA (all postgres-owned).
 ExecStart={{ citus_pg_patroni_venv }}/bin/patroni /etc/patroni/patroni.yml

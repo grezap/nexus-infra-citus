@@ -4,7 +4,7 @@
 Patroni HA: the **PostgreSQL-native horizontal-sharding** tier (the PG sibling
 of `nexus-infra-vitess`'s MySQL sharding).
 
-- **Engine:** PostgreSQL 17 + the **Citus 13.x** extension
+- **Engine:** PostgreSQL 17 + the **Citus 14.x** extension
   (`shared_preload_libraries='citus'`). A **coordinator** holds the distributed
   catalog (`pg_dist_*`) and routes/aggregates queries; **worker** node-groups
   hold the shards of every distributed table.
