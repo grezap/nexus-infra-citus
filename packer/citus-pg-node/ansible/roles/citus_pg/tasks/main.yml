@@ -20,7 +20,7 @@
     state: present
 
 # ─── PostgreSQL 17 (Debian trixie native apt) ─────────────────────────────
-- name: Install PostgreSQL {{ citus_pg_pg_major }} + client + contrib
+- name: Install PostgreSQL server + client + contrib for major {{ citus_pg_pg_major }}
   ansible.builtin.apt:
     name:
       - "postgresql-{{ citus_pg_pg_major }}"
@@ -66,7 +66,7 @@
   register: citus_pg_repo_probe
   failed_when: false
 
-- name: Choose Citus repo codename (fall back to {{ citus_pg_citus_repo_codename_fallback }} if running codename unsupported)
+- name: Choose the Citus repo codename (running codename, else the fallback {{ citus_pg_citus_repo_codename_fallback }})
   ansible.builtin.set_fact:
     citus_pg_repo_codename: >-
       {{ citus_pg_codename.stdout
@@ -86,7 +86,7 @@
     state: present
     update_cache: true
 
-- name: Install Citus {{ citus_pg_citus_version }} extension for PostgreSQL {{ citus_pg_pg_major }}
+- name: Install the Citus extension apt package for the target PostgreSQL major, version {{ citus_pg_citus_version }}
   ansible.builtin.apt:
     name: "postgresql-{{ citus_pg_pg_major }}-citus-{{ citus_pg_citus_version }}"
     state: present
@@ -103,7 +103,7 @@
   args:
     creates: "{{ citus_pg_patroni_venv }}/bin/python"
 
-- name: Install Patroni {{ citus_pg_patroni_version }} (etcd3 extra) + psycopg2 into the venv
+- name: Install Patroni (etcd3 extra) + psycopg2 into the venv at version {{ citus_pg_patroni_version }}
   ansible.builtin.pip:
     name:
       - "patroni[etcd3]=={{ citus_pg_patroni_version }}"
