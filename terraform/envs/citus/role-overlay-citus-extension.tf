@@ -80,6 +80,22 @@ APP_PWD=`$(sudo cat /etc/nexus-citus/citus-app-password)
 pq_local() { sudo -u postgres psql -h "`$SOCK" -U postgres -d "`$1" -v ON_ERROR_STOP=1 -tA -c "`$2"; }
 pq_remote() { sudo -u postgres psql "host=`$1 port=5432 dbname=`$2 user=postgres `$TLS" -v ON_ERROR_STOP=1 -tA -c "`$3"; }
 
+# Wait until a VIP points at a READ-WRITE primary (pg_is_in_recovery() = f).
+# keepalived has just started, so the VIP can briefly sit on a read-only replica
+# until the vrrp_script settles it on the Patroni leader; running CREATE
+# EXTENSION before then fails "cannot execute CREATE EXTENSION in a read-only
+# transaction". (0.P ratification transient T7.)
+wait_rw() {
+  local host="`$1"
+  for i in `$(seq 1 40); do
+    ro=`$(sudo -u postgres psql "host=`$host port=5432 dbname=postgres user=postgres `$TLS" -tA -c "SELECT pg_is_in_recovery()" 2>/dev/null || echo err)
+    if [ "`$ro" = "f" ]; then return 0; fi
+    sleep 3
+  done
+  echo "[citus-extension] ERROR: `$host VIP never settled on a read-write primary within 120s" >&2
+  return 1
+}
+
 # 1. coordinator: database + extension
 if [ "`$(pq_local postgres "SELECT 1 FROM pg_database WHERE datname='`$CITUS_DB'")" != "1" ]; then
   pq_local postgres "CREATE DATABASE `$CITUS_DB"
@@ -89,6 +105,7 @@ echo "[citus-extension] coordinator: database `$CITUS_DB + citus extension ready
 
 # 2. each worker (via VIP, mTLS): database + extension
 for w in '$w1Vip' '$w2Vip'; do
+  wait_rw "`$w"
   if [ "`$(pq_remote "`$w" postgres "SELECT 1 FROM pg_database WHERE datname='`$CITUS_DB'")" != "1" ]; then
     pq_remote "`$w" postgres "CREATE DATABASE `$CITUS_DB"
   fi

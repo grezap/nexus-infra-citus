@@ -4,6 +4,33 @@ All notable changes to the Citus-sharded PostgreSQL tier (NexusPlatform Phase
 0.P). Format loosely follows Keep a Changelog; the repo is versioned to the
 NexusPlatform phase cadence.
 
+## [v0.1.0] — Phase 0.P SEALED (2026-06-03)
+
+**Live-ratified + cold-rebuild-proven** — `smoke-0.P.ps1` **69/69 GREEN** both
+times (including the destructive worker-Patroni-failover test: kill the worker1
+leader → Patroni promotes the standby → the keepalived VIP follows the new
+leader → the cross-shard query keeps returning → the killed node rejoins as a
+replica). 9 VMs + 3 VRRP VIPs on tier `08-citus`, PostgreSQL 17 + Citus 14.x,
+full Vault-PKI mTLS.
+
+### Ratification transients fixed in source (handbook §3.x T1–T6)
+
+- **T1** — Citus apt: the codename probe followed the packagecloud 302 to use
+  native `trixie`; `citus_version` `13.0`→**`14.1`** (latest GA; trixie publishes
+  13.2/13.3/14.0/14.1 for PG 17).
+- **T2** — `patronictl` has no `--version` flag → `stat` check instead.
+- **T3** — `keepalived --version` writes to stderr → robust verify (no
+  `stdout_lines|first` on an empty sequence).
+- **T4** — Patroni (runs as `postgres`) couldn't `mkdir /run/nexus-citus` (tmpfs,
+  root-owned) → `RuntimeDirectory=nexus-citus` in the unit (+ idempotent overlay
+  drop-in + `reset-failed`).
+- **T5** — replica `pg_basebackup` rejected (`clientcert=verify-ca`) → added
+  `sslmode/sslcert/sslkey/sslrootcert` to the `superuser`/`replication`/`rewind`
+  Patroni auth blocks; bring-up `start`→`restart`.
+- **T6** — keepalived `nopreempt` stranded a VIP on a demoted replica → removed
+  (VIP now follows the Patroni leader); smoke VIP curl needs `sudo` (CA behind a
+  `0750 root:postgres` dir).
+
 ## [Unreleased] — Phase 0.P scaffold
 
 ### Added

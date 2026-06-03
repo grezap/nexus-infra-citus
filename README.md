@@ -29,8 +29,11 @@ of `nexus-infra-vitess`'s MySQL sharding).
 
 ## Status
 
-**In ratification** (Phase 0.P). Per-engine Packer templates + per-cluster
-Terraform state per `feedback_per_cluster_state_per_engine_template`.
+**SEALED 2026-06-03 (`v0.1.0`, ADR-0042)** — live-ratified + cold-rebuild-proven
+(`smoke-0.P.ps1` **69/69 GREEN** both times, incl the worker-Patroni-failover
+test). Per-engine Packer templates + per-cluster Terraform state per
+`feedback_per_cluster_state_per_engine_template`. 6 ratification transients fixed
+in source (handbook §3.x T1–T6).
 
 ## Layout
 
