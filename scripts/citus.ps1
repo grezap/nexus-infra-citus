@@ -1,11 +1,11 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  Phase 0.O operator wrapper for the vitess env (Vitess-sharded MySQL cluster).
+  Phase 0.P operator wrapper for the citus env (Citus-sharded PostgreSQL cluster).
 
 .DESCRIPTION
-  pwsh-native equivalent of `make` targets. Drives terraform/envs/vitess/ with
-  apply/destroy/cycle/smoke/plan/validate. The FIRST 12-VM apply should use
+  pwsh-native equivalent of `make` targets. Drives terraform/envs/citus/ with
+  apply/destroy/cycle/smoke/plan/validate. The FIRST 9-VM apply should use
   -parallelism=3 to avoid the vmrun power-on storm (Phase 0.N lesson N10) --
   pass it via -Parallelism 3 (default) or override.
 
@@ -20,9 +20,9 @@
   first apply; bump to 10 for overlay-only re-applies once VMs exist).
 
 .EXAMPLE
-  pwsh -File scripts\vitess.ps1 apply
-  pwsh -File scripts\vitess.ps1 apply -Parallelism 10
-  pwsh -File scripts\vitess.ps1 cycle
+  pwsh -File scripts\citus.ps1 apply
+  pwsh -File scripts\citus.ps1 apply -Parallelism 10
+  pwsh -File scripts\citus.ps1 cycle
 #>
 
 [CmdletBinding()]
@@ -37,8 +37,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot  = Split-Path -Parent $PSScriptRoot
-$envDir    = Join-Path $repoRoot 'terraform\envs\vitess'
-$smokePath = Join-Path $repoRoot 'scripts\smoke-0.O.ps1'
+$envDir    = Join-Path $repoRoot 'terraform\envs\citus'
+$smokePath = Join-Path $repoRoot 'scripts\smoke-0.P.ps1'
 
 function Write-Step([string]$title) {
     Write-Host ''
@@ -112,4 +112,4 @@ switch ($Verb) {
 }
 
 Write-Host ''
-Write-Host "vitess $Verb complete" -ForegroundColor Green
+Write-Host "citus $Verb complete" -ForegroundColor Green
