@@ -4,6 +4,28 @@ All notable changes to the Citus-sharded PostgreSQL tier (NexusPlatform Phase
 0.P). Format loosely follows Keep a Changelog; the repo is versioned to the
 NexusPlatform phase cadence.
 
+## [Unreleased] — nexus-cli v0.7.3 CitusAdapter support (2026-06-18)
+
+The Citus tier gained the cold-rebuild overlays the **`CitusAdapter`** (nexus-cli v0.7.3) needs — the
+ADR-0011 Vault-KV operator-credential model, identical to every other password-auth adapter.
+
+### Added
+- **`role-overlay-citus-operator-user.tf`** (var `enable_citus_operator_user`) — one-shot on the
+  coordinator leader: create the `nexus-cluster-admin` operator role (LOGIN CREATEROLE CREATEDB +
+  pg_read/write_all_data + ALL on the `citus` DB + public; NOT superuser), password read on-node via the
+  Vault Agent token from KV `nexus/citus/operator-password`. Citus auto-propagates the role to the workers;
+  the overlay also appends `*:5432:*:nexus-cluster-admin:<pw>` to `~postgres/.pgpass` on **both** coordinator
+  nodes so the coordinator dials the workers AS the operator → distributed queries run as the operator.
+  Verifies a distributed `SELECT count(*) FROM events` via the coordinator VIP.
+
+### Changed
+- **`role-overlay-citus-patroni-bootstrap.tf` → v2** — added a top-level **`ctl:` block** to the rendered
+  patroni.yml (cacert/certfile/keyfile = the node's own TLS) so `patronictl` presents a client cert for
+  state-changing REST calls. Without it a graceful switchover 403s "client certificate required" (the REST
+  `verify_client: optional` requires a client cert for unsafe endpoints) — caught live by the CitusAdapter
+  failover verb, the same lesson as the 0.G.4 PatroniAdapter. patroni.yml stays `0640 postgres:postgres`
+  (the daemon runs as postgres). ctl is client-only, so the change needs no restart.
+
 ## [v0.1.0] — Phase 0.P SEALED (2026-06-03)
 
 **Live-ratified + cold-rebuild-proven** — `smoke-0.P.ps1` **69/69 GREEN** both

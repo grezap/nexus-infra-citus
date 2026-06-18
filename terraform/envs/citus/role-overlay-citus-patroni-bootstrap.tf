@@ -50,7 +50,7 @@ resource "null_resource" "citus_patroni_bootstrap" {
   triggers = {
     tls_ids                   = join(",", [for host in keys(local.citus_pg_nodes_active) : null_resource.citus_tls[host].id])
     etcd_bootstrap_id         = length(null_resource.citus_etcd_bootstrap) > 0 ? null_resource.citus_etcd_bootstrap[0].id : "disabled"
-    citus_patroni_bootstrap_v = "1" # v1 (0.P) = 3 Patroni scopes (coord + worker1 + worker2), PG 17 + Citus preload + etcd3 cert-auth DCS + verify-ca mTLS pg_hba.
+    citus_patroni_bootstrap_v = "2" # v2 (0.7.3) = + `ctl:` block so patronictl presents a client cert for state-changing REST calls (graceful switchover); v1 = 3 Patroni scopes (coord + worker1 + worker2), PG 17 + Citus preload + etcd3 cert-auth DCS + verify-ca mTLS pg_hba.
   }
 
   depends_on = [null_resource.citus_tls, null_resource.citus_etcd_bootstrap]
@@ -100,6 +100,18 @@ restapi:
   authentication:
     username: nexusops
     password: __REST_PWD__
+
+# patronictl client config. verify_client=optional REQUIRES a client cert for
+# state-changing REST calls (POST /switchover, /restart); without a `ctl:` block
+# patronictl presents none and the call 403s "client certificate required" (the
+# v0.7.3 CitusAdapter live-caught this -- same as the 0.G.4 PatroniAdapter). The
+# node's own leaf doubles as the client cert. ctl is client-only (read fresh per
+# invocation), so adding it needs no restart.
+ctl:
+  insecure: false
+  cacert: /etc/nexus-citus/tls/ca.pem
+  certfile: /etc/nexus-citus/tls/server-cert.pem
+  keyfile: /etc/nexus-citus/tls/server-key.pem
 
 etcd3:
   hosts: $etcdHosts

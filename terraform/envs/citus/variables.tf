@@ -243,6 +243,12 @@ variable "enable_citus_distribute" {
   description = "role-overlay-citus-distribute.tf -- one-shot: create distributed + reference + colocated demo tables, seed rows, verify shards span both worker groups + a cross-shard aggregate routes through the coordinator."
 }
 
+variable "enable_citus_operator_user" {
+  type        = bool
+  default     = true
+  description = "role-overlay-citus-operator-user.tf -- one-shot: create the nexus-cli operator role nexus-cluster-admin (ADR-0011 Vault-KV model; pw at nexus/citus/operator-password) on the coordinator (auto-propagates to workers) + a ~postgres/.pgpass entry on both coord nodes so distributed queries run as the operator. Consumed by the v0.7.3 CitusAdapter."
+}
+
 # ─── Operator + cross-env coupling vars ───────────────────────────────────
 
 variable "citus_node_user" {
