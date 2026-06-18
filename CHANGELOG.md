@@ -25,6 +25,13 @@ ADR-0011 Vault-KV operator-credential model, identical to every other password-a
   `verify_client: optional` requires a client cert for unsafe endpoints) — caught live by the CitusAdapter
   failover verb, the same lesson as the 0.G.4 PatroniAdapter. patroni.yml stays `0640 postgres:postgres`
   (the daemon runs as postgres). ctl is client-only, so the change needs no restart.
+- **`role-overlay-citus-patroni-bootstrap.tf` patroni.yml staging dispatch** — changed from an ssh **argv**
+  (`ssh ... "echo '<b64>' | base64 -d | bash"`) to a **STDIN** pipe (`$stageB64 | ssh ... "tr -d '\r' |
+  base64 -d | bash"`). The v2 ctl block pushed the inlined base64 over the ssh.exe ~8 KB Windows
+  command-line limit, truncating the argv (unterminated single quote -> `bash: line 1: unexpected EOF
+  matching '`). Surfaced by the v0.7.3 cold-rebuild; matches the extension/distribute overlays' `bash -s`
+  idiom (no argv size limit). **Cold-rebuild PROVEN 2026-06-18** (destroy -> from-zero apply -> smoke-0.P
+  ALL PASSED -> full nexus-cli verb matrix re-ran GREEN).
 
 ## [v0.1.0] — Phase 0.P SEALED (2026-06-03)
 

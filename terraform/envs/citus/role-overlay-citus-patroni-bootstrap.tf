@@ -101,12 +101,11 @@ restapi:
     username: nexusops
     password: __REST_PWD__
 
-# patronictl client config. verify_client=optional REQUIRES a client cert for
-# state-changing REST calls (POST /switchover, /restart); without a `ctl:` block
-# patronictl presents none and the call 403s "client certificate required" (the
-# v0.7.3 CitusAdapter live-caught this -- same as the 0.G.4 PatroniAdapter). The
-# node's own leaf doubles as the client cert. ctl is client-only (read fresh per
-# invocation), so adding it needs no restart.
+# patronictl client config. With restapi verify_client=optional, state-changing
+# REST calls (switchover/restart POSTs) REQUIRE a client cert; without a ctl
+# block patronictl presents none and the call returns 403 client-cert-required
+# (the v0.7.3 CitusAdapter caught this live, same as the 0.G.4 PatroniAdapter).
+# The node leaf doubles as the client cert. ctl is client-only, so no restart.
 ctl:
   insecure: false
   cacert: /etc/nexus-citus/tls/ca.pem
@@ -256,7 +255,12 @@ sudo systemctl enable nexus-patroni.service
 echo CONFIG_OK
 "@
           $stageB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage))
-          $out = (ssh @sshOpts "$sshUser@$($n.VmIp)" "echo '$stageB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
+          # Pipe the base64 staging script via STDIN (not an ssh argv arg): the
+          # v2 config + ctl block pushed the inlined `echo '<b64>'` over the
+          # ssh.exe ~8 KB argv cliff -> truncation -> "unexpected EOF matching '"
+          # (the v0.7.3 cold-rebuild caught this). Mirrors the extension/distribute
+          # overlays' `bash -s` idiom. tr -d '\r' strips the CR PowerShell adds.
+          $out = ($stageB64 | ssh @sshOpts "$sshUser@$($n.VmIp)" "tr -d '\r' | base64 -d | bash" 2>&1 | Out-String).Trim()
           if ($out -notmatch 'CONFIG_OK') {
             throw "[citus-patroni-bootstrap] $($n.Host): patroni.yml staging failed -- $out"
           }
